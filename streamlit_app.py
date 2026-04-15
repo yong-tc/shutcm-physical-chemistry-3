@@ -3,8 +3,6 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from scipy.interpolate import CubicSpline, PchipInterpolator
-from scipy.misc import derivative
-import base64
 
 # ==================== 页面配置 ====================
 st.set_page_config(page_title="最大气泡法测定表面张力", layout="wide")
@@ -33,7 +31,8 @@ def vol_to_molar_concentration(vol_percent, ethanol_density=0.789, ethanol_molar
     vol_percent: 例如 12.5 表示 12.5% 乙醇
     返回 mol/m³
     """
-    # 假设 100 mL 溶液
+    if vol_percent == 0:
+        return 0.0
     vol_ethanol = vol_percent  # mL
     mass_ethanol = vol_ethanol * ethanol_density  # g
     moles_ethanol = mass_ethanol / ethanol_molar_mass
@@ -41,20 +40,23 @@ def vol_to_molar_concentration(vol_percent, ethanol_density=0.789, ethanol_molar
     conc_mol_per_L = moles_ethanol / (volume_solution / 1000)  # mol/L
     return conc_mol_per_L * 1000  # mol/m³
 
-def calculate_surface_tension(df, sigma_water, deltaP_water, temp):
+def calculate_surface_tension(df, sigma_water, deltaP_water):
     """
     计算仪器常数 K，各溶液的表面张力 σ，以及摩尔浓度 c
     返回新 DataFrame 及仪器常数 K
     """
     df = df.copy()
-    # 仪器常数
     K = sigma_water / deltaP_water
     df["表面张力 σ (N/m)"] = K * df["液柱差 ΔP"]
-    # 计算摩尔浓度 (mol/m³)
+    # 计算摩尔浓度 (mol/m³) – 乙醇密度和摩尔质量使用全局设置
     df["摩尔浓度 c (mol/m³)"] = df["体积比 (%)"].apply(
-        lambda x: vol_to_molar_concentration(x) if x > 0 else 0
+        lambda x: vol_to_molar_concentration(x, st.session_state.ethanol_density, st.session_state.ethanol_molar_mass)
     )
     return df, K
+
+def numerical_derivative(f, x, dx=1e-6):
+    """中心差分法求一阶导数"""
+    return (f(x + dx) - f(x - dx)) / (2 * dx)
 
 def compute_adsorption(df, target_vol_percent, temp, ethanol_density=0.789, ethanol_molar_mass=46.07):
     """
@@ -83,7 +85,7 @@ def compute_adsorption(df, target_vol_percent, temp, ethanol_density=0.789, etha
         st.warning(f"目标浓度 {target_c:.0f} mol/m³ 超出数据范围，无法计算导数。")
         return None
     # 数值求导 dσ/dc
-    dsigma_dc = derivative(f, target_c, dx=1e-3)
+    dsigma_dc = numerical_derivative(f, target_c, dx=1e-3)
     # 吸附量 Γ = - (c/(RT)) * (dσ/dc)
     R = 8.314  # J/(mol·K)
     T = temp + 273.15
@@ -93,13 +95,16 @@ def compute_adsorption(df, target_vol_percent, temp, ethanol_density=0.789, etha
 # ==================== 侧边栏：参数设置 ====================
 st.sidebar.header("⚙️ 实验参数")
 temp = st.sidebar.number_input("实验温度 (℃)", value=st.session_state.temp, step=0.1, format="%.1f")
-sigma_water = st.sidebar.number_input("纯水表面张力 (mN/m)", value=72.75, step=0.01, format="%.2f") * 1e-3
+sigma_water_mNm = st.sidebar.number_input("纯水表面张力 (mN/m)", value=72.75, step=0.01, format="%.2f")
+sigma_water = sigma_water_mNm * 1e-3
 ethanol_density = st.sidebar.number_input("乙醇密度 (g/mL)", value=0.789, step=0.001, format="%.3f")
 ethanol_molar_mass = st.sidebar.number_input("乙醇摩尔质量 (g/mol)", value=46.07, step=0.01, format="%.2f")
 
 # 保存到 session_state
 st.session_state.sigma_water = sigma_water
 st.session_state.temp = temp
+st.session_state.ethanol_density = ethanol_density
+st.session_state.ethanol_molar_mass = ethanol_molar_mass
 
 # ==================== 数据输入 ====================
 st.subheader("📝 实验数据录入")
@@ -140,7 +145,7 @@ if st.button("🔍 计算表面张力及吸附量"):
             st.stop()
         deltaP_water = water_row.iloc[0]["液柱差 ΔP"]
         # 计算
-        df_calc, K = calculate_surface_tension(df_input, sigma_water, deltaP_water, temp)
+        df_calc, K = calculate_surface_tension(df_input, sigma_water, deltaP_water)
         st.session_state.K = K
         st.session_state.calc_df = df_calc
         
@@ -182,7 +187,7 @@ if st.button("🔍 计算表面张力及吸附量"):
                 st.write(f"- 摩尔浓度 c = {target_c:.2f} mol/m³")
                 st.write(f"- 切线斜率 dσ/dc = {dsigma_dc:.4e} N·m²/mol")
                 st.write(f"- 吸附量 Γ = {Gamma:.4e} mol/m²")
-                # 将结果保存到 session_state 用于报告
+                # 保存到 session_state 用于报告
                 st.session_state.Gamma = Gamma
                 st.session_state.target_c = target_c
                 st.session_state.dsigma_dc = dsigma_dc
@@ -257,7 +262,7 @@ if st.button("📄 生成并打印报告"):
             <h2>1. 实验数据及计算结果</h2>
             {table_html}
             <div class="info">
-                <strong>实验条件：</strong> 温度 {temp} ℃，纯水表面张力 {sigma_water*1000:.2f} mN/m<br>
+                <strong>实验条件：</strong> 温度 {temp} ℃，纯水表面张力 {sigma_water_mNm:.2f} mN/m<br>
                 <strong>仪器常数 K：</strong> {K:.4f} m
             </div>
             {gamma_html}
